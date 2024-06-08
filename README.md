@@ -28,7 +28,7 @@ A gateway for proxying to remote PostgreSQL DB. Useful when you want to connect 
 	defer gw.Close()
 
     // connect to gateway via any pg driver
-	conn, err := pgx.Connect(ctx, "postgres://localhost:8888/postgres?sslmode=disable")
+	conn, err := pgx.Connect(ctx, "postgres://localhost:8888/postgres?user=foobar&sslmode=disable")
 ```
 
 
