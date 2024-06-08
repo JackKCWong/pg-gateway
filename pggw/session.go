@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"slices"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/lib/pq/scram"
@@ -14,7 +15,6 @@ import (
 
 type Session interface {
 	Run(ctx context.Context)
-	Close()
 }
 
 type GatedSession struct {
@@ -28,14 +28,9 @@ type GatedSession struct {
 	right      *pgproto3.Frontend
 	saslFinal  []byte
 
-	logger *slog.Logger
-}
+	closing sync.Once
 
-func (s *GatedSession) Close() {
-	if s.clientConn != nil {
-		s.left.Flush()
-		s.clientConn.Close()
-	}
+	logger *slog.Logger
 }
 
 func (s *GatedSession) Run(ctx context.Context) {
@@ -51,7 +46,7 @@ func (s *GatedSession) Run(ctx context.Context) {
 		return
 	}
 
-	s.logger.Info("resolved", "host", remote.Host, "port", remote.Port, "user", remote.User, "database", remote.Database, "params", remote.Params)
+	s.logger.Debug("resolved", "host", remote.Host, "port", remote.Port, "user", remote.User, "database", remote.Database, "params", remote.Params)
 
 	err = s.connectToBackend(remote)
 	if err != nil {
@@ -72,19 +67,21 @@ func (s *GatedSession) Run(ctx context.Context) {
 	}
 }
 
-func (t *GatedSession) waitForClientStartup() (*pgproto3.StartupMessage, error) {
-	startUpMsg, err := t.left.ReceiveStartupMessage()
+func (s *GatedSession) waitForClientStartup() (*pgproto3.StartupMessage, error) {
+	s.logger.Debug("waiting for client startup")
+	startUpMsg, err := s.left.ReceiveStartupMessage()
 	if err != nil {
-		t.logger.Error("failed to receive startup message", "err", err)
+		s.logger.Error("failed to receive startup message", "err", err)
 		return nil, err
 	}
 
 	switch startUpMsg := startUpMsg.(type) {
 	case *pgproto3.StartupMessage:
+		s.logger.Debug("client startup received")
 		return startUpMsg, nil
 
 	case *pgproto3.SSLRequest:
-		_, err = t.clientConn.Write([]byte("N"))
+		_, err = s.clientConn.Write([]byte("N"))
 		if err != nil {
 			return nil, fmt.Errorf("error sending deny SSL request: %w", err)
 		}
@@ -97,11 +94,13 @@ func (t *GatedSession) waitForClientStartup() (*pgproto3.StartupMessage, error) 
 }
 
 func (s *GatedSession) connectToBackend(remote RemotePgBackend) error {
+	s.logger.Debug("connecting to remote", "host", remote.Host, "port", remote.Port, "user", remote.User, "database", remote.Database, "params", remote.Params)
 	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", remote.Host, remote.Port))
 	if err != nil {
 		return fmt.Errorf("error connecting to remote: %w", err)
 	}
 
+	s.serverConn = conn
 	s.right = pgproto3.NewFrontend(conn, conn)
 	params := map[string]string{
 		"user":     remote.User,
@@ -126,10 +125,12 @@ func (s *GatedSession) connectToBackend(remote RemotePgBackend) error {
 		return fmt.Errorf("error sending startup message: %w", err)
 	}
 
+	s.logger.Debug("startup message sent")
 	return nil
 }
 
 func (s *GatedSession) authHandshake(user, pass string) error {
+	s.logger.Debug("waiting for auth method negotiate")
 	msg, err := s.right.Receive()
 	if err != nil {
 		return fmt.Errorf("error receiving auth message: %w", err)
@@ -137,6 +138,7 @@ func (s *GatedSession) authHandshake(user, pass string) error {
 
 	switch msg := msg.(type) {
 	case *pgproto3.AuthenticationSASL:
+		s.logger.Debug("SASL received")
 		if !slices.Contains(msg.AuthMechanisms, "SCRAM-SHA-256") {
 			return fmt.Errorf("unsupported SASL mechanisms: %#v", msg)
 		}
@@ -190,10 +192,12 @@ func (s *GatedSession) authHandshake(user, pass string) error {
 }
 
 func (s *GatedSession) copySteadyState(ctx context.Context) error {
+	s.logger.Debug("steady state")
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
+				s.close()
 				return
 			default:
 				msg, err := s.right.Receive()
@@ -214,6 +218,7 @@ func (s *GatedSession) copySteadyState(ctx context.Context) error {
 		for {
 			select {
 			case <-ctx.Done():
+				s.close()
 				return
 			default:
 				msg, err := s.left.Receive()
@@ -231,4 +236,14 @@ func (s *GatedSession) copySteadyState(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func (s *GatedSession) close() {
+	s.closing.Do(func() {
+		s.logger.Debug("closing session")
+		s.left.Flush()
+		s.clientConn.Close()
+		s.right.Flush()
+		s.serverConn.Close()
+	})
 }

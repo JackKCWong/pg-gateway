@@ -2,6 +2,9 @@ package pggw_test
 
 import (
 	"context"
+	"log/slog"
+	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,29 +27,49 @@ func TestGateway(t *testing.T) {
 		}, nil
 	})
 
-	go gw.Serve(context.Background(), "localhost:8888")
-	defer gw.Close()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})))
 
+	go gw.Serve(ctx, "localhost:8888")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		testQuery(ctx, t, "SELECT 1")
+	}()
+	go func() {
+		defer wg.Done()
+		testQuery(ctx, t, "SELECT 2")
+	}()
+	wg.Wait()
+}
+
+func testQuery(ctx context.Context, t *testing.T, query string) {
 	conn, err := pgx.Connect(ctx, "postgres://localhost:8888/postgres?user=pg&sslmode=disable")
 	if err != nil {
-		t.Fatalf("Unable to connect to database: %v", err)
+		t.Logf("Unable to connect to database: %v", err)
+		t.Fail()
 	}
 
-	rs, err := conn.Query(ctx, "SELECT 1")
+	rs, err := conn.Query(ctx, query)
 	if err != nil {
-		t.Fatalf("Unable to query database: %v", err)
+		t.Logf("Unable to query database: %v", err)
+		t.Fail()
 	}
 
 	if !rs.Next() {
-		t.Fatalf("no query result: %v", err)
+		t.Logf("no query result: %v", err)
+		t.Fail()
 	}
 
 	if v, err := rs.Values(); err == nil {
 		t.Logf("Result: %v", v)
 	} else {
-		t.Fatalf("Unable to get query result: %v", err)
+		t.Logf("Unable to get query result: %v", err)
+		t.Fail()
 	}
-
 }
 
 func TestDirectConnect(t *testing.T) {

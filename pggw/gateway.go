@@ -25,7 +25,6 @@ type ConnectionResolver func(ctx context.Context, params map[string]string) (Rem
 
 type Gateway struct {
 	resolve  ConnectionResolver
-	addr     string
 	mux      sync.Mutex
 	sessions []Session
 	idgen    *sqids.Sqids
@@ -52,7 +51,7 @@ func (gw *Gateway) Serve(ctx context.Context, addr string) error {
 		return err
 	}
 
-	slog.Info("listening", "address", ln.Addr())
+	slog.Debug("listening", "address", ln.Addr())
 
 	for {
 		conn, err := ln.Accept()
@@ -66,11 +65,11 @@ func (gw *Gateway) Serve(ctx context.Context, addr string) error {
 }
 
 func (gw *Gateway) startSession(ctx context.Context, conn net.Conn) {
-	slog.Info("new session")
 	gw.mux.Lock()
 
 	seq := len(gw.sessions)
 	sid, _ := gw.idgen.Encode([]uint64{uint64(seq)})
+	slog.Debug("new session", "sid", sid)
 	ses := GatedSession{
 		id:      sid,
 		resolve: gw.resolve,
@@ -82,13 +81,4 @@ func (gw *Gateway) startSession(ctx context.Context, conn net.Conn) {
 	gw.mux.Unlock()
 
 	ses.Run(ctx)
-}
-
-func (gw *Gateway) Close() {
-	gw.mux.Lock()
-	defer gw.mux.Unlock()
-
-	for _, s := range gw.sessions {
-		s.Close()
-	}
 }

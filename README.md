@@ -24,11 +24,10 @@ A gateway for proxying to remote PostgreSQL DB. Useful when you want to connect 
 	})
 
     // start gateway
-	go gw.Serve(context.Background(), "localhost:8888")
-	defer gw.Close()
+	go gw.Serve(ctx, "localhost:8888")
 
     // connect to gateway via any pg driver
-	conn, err := pgx.Connect(ctx, "postgres://localhost:8888/postgres?user=foobar&sslmode=disable")
+	conn, err := pgx.Connect(context.TODO(), "postgres://localhost:8888/postgres?user=foobar&sslmode=disable")
 ```
 
 
