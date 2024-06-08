@@ -19,8 +19,7 @@ type RemotePgBackend struct {
 	Params   map[string]string
 }
 
-
-// ConnectionResolver resolves a local postgres connection string to a remote backend. 
+// ConnectionResolver resolves a local postgres connection string to a remote backend.
 type ConnectionResolver func(ctx context.Context, params map[string]string) (RemotePgBackend, error)
 
 type Gateway struct {
@@ -71,10 +70,11 @@ func (gw *Gateway) startSession(ctx context.Context, conn net.Conn) {
 	sid, _ := gw.idgen.Encode([]uint64{uint64(seq)})
 	slog.Debug("new session", "sid", sid)
 	ses := GatedSession{
-		id:      sid,
-		resolve: gw.resolve,
-		left:    pgproto3.NewBackend(conn, conn),
-		logger:  slog.Default().With("sid", sid),
+		id:         sid,
+		resolve:    gw.resolve,
+		clientConn: conn,
+		left:       pgproto3.NewBackend(conn, conn),
+		logger:     slog.Default().With("sid", sid),
 	}
 
 	gw.sessions = append(gw.sessions, &ses)

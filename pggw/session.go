@@ -34,7 +34,7 @@ type GatedSession struct {
 }
 
 func (s *GatedSession) Run(ctx context.Context) {
-	su, err := s.waitForClientStartup()
+	su, err := s.waitForClientStartup(ctx)
 	if err != nil {
 		s.logger.Error("failed to startup session", "err", err)
 		return
@@ -67,29 +67,38 @@ func (s *GatedSession) Run(ctx context.Context) {
 	}
 }
 
-func (s *GatedSession) waitForClientStartup() (*pgproto3.StartupMessage, error) {
+func (s *GatedSession) waitForClientStartup(ctx context.Context) (*pgproto3.StartupMessage, error) {
 	s.logger.Debug("waiting for client startup")
-	startUpMsg, err := s.left.ReceiveStartupMessage()
-	if err != nil {
-		s.logger.Error("failed to receive startup message", "err", err)
-		return nil, err
-	}
-
-	switch startUpMsg := startUpMsg.(type) {
-	case *pgproto3.StartupMessage:
-		s.logger.Debug("client startup received")
-		return startUpMsg, nil
-
-	case *pgproto3.SSLRequest:
-		_, err = s.clientConn.Write([]byte("N"))
-		if err != nil {
-			return nil, fmt.Errorf("error sending deny SSL request: %w", err)
+	for {
+		select {
+		    case <-ctx.Done():
+				return nil, fmt.Errorf("context cancelled")
+			
+		    default:
+				break
 		}
 
-		return nil, fmt.Errorf("SSL not supported")
+		startUpMsg, err := s.left.ReceiveStartupMessage()
+		if err != nil {
+			s.logger.Error("failed to receive startup message", "err", err)
+			return nil, err
+		}
 
-	default:
-		return nil, fmt.Errorf("unsupported startup message: %#v", startUpMsg)
+		switch startUpMsg := startUpMsg.(type) {
+		case *pgproto3.StartupMessage:
+			s.logger.Debug("client startup received")
+			return startUpMsg, nil
+
+		case *pgproto3.SSLRequest:
+			_, err = s.clientConn.Write([]byte("N"))
+			if err != nil {
+				return nil, fmt.Errorf("error sending deny SSL request: %w", err)
+			}
+
+			continue
+		default:
+			return nil, fmt.Errorf("unsupported startup message: %#v", startUpMsg)
+		}
 	}
 }
 
