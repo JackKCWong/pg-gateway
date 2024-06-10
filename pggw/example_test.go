@@ -51,17 +51,20 @@ func testQuery(ctx context.Context, t *testing.T, query string) {
 	if err != nil {
 		t.Logf("Unable to connect to database: %v", err)
 		t.Fail()
+		return
 	}
 
 	rs, err := conn.Query(ctx, query)
 	if err != nil {
 		t.Logf("Unable to query database: %v", err)
 		t.Fail()
+		return
 	}
 
 	if !rs.Next() {
 		t.Logf("no query result: %v", err)
 		t.Fail()
+		return
 	}
 
 	if v, err := rs.Values(); err == nil {
@@ -69,6 +72,7 @@ func testQuery(ctx context.Context, t *testing.T, query string) {
 	} else {
 		t.Logf("Unable to get query result: %v", err)
 		t.Fail()
+		return
 	}
 }
 

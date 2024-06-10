@@ -15,6 +15,7 @@ import (
 
 type Session interface {
 	Run(ctx context.Context)
+	Close()
 }
 
 type GatedSession struct {
@@ -34,29 +35,50 @@ type GatedSession struct {
 }
 
 func (s *GatedSession) Run(ctx context.Context) {
-	su, err := s.waitForClientStartup(ctx)
+	su, err := s.clientHandshake(ctx)
 	if err != nil {
-		s.logger.Error("failed to startup session", "err", err)
+		s.logger.Error("startup handshake with client failed", "err", err)
 		return
 	}
 
 	remote, err := s.resolve(ctx, su.Parameters)
 	if err != nil {
-		s.logger.Error("failed to authenticate session", "err", err)
+		s.logger.Error("failed to resolve remote destination", "err", err)
+		s.left.Send(&pgproto3.ErrorResponse{
+			Severity: "FATAL",
+			Code:     "58000",
+			Message:  fmt.Sprintf("failed to resolve remote destination: %q", err),
+		})
+		s.left.Flush()
+		s.Close()
 		return
 	}
 
 	s.logger.Debug("resolved", "host", remote.Host, "port", remote.Port, "user", remote.User, "database", remote.Database, "params", remote.Params)
 
-	err = s.connectToBackend(remote)
+	err = s.connectToPg(remote)
 	if err != nil {
 		s.logger.Error("failed to establish remote session", "err", err)
+		s.left.Send(&pgproto3.ErrorResponse{
+			Severity: "FATAL",
+			Code:     "08000",
+			Message:  fmt.Sprintf("failed to establish remote session: %q", err),
+		})
+		s.left.Flush()
+		s.Close()
 		return
 	}
 
-	err = s.authHandshake(remote.User, remote.Password)
+	err = s.remoteHandshake(remote.User, remote.Password)
 	if err != nil {
-		s.logger.Error("failed to authenticate session", "err", err)
+		s.logger.Error("failed to authenticate remote session", "err", err)
+		s.left.Send(&pgproto3.ErrorResponse{
+			Severity: "FATAL",
+			Code:     "28000",
+			Message:  fmt.Sprintf("failed to authenticate remote session: %q", err),
+		})
+		s.left.Flush()
+		s.Close()
 		return
 	}
 
@@ -67,15 +89,15 @@ func (s *GatedSession) Run(ctx context.Context) {
 	}
 }
 
-func (s *GatedSession) waitForClientStartup(ctx context.Context) (*pgproto3.StartupMessage, error) {
+func (s *GatedSession) clientHandshake(ctx context.Context) (*pgproto3.StartupMessage, error) {
 	s.logger.Debug("waiting for client startup")
 	for {
 		select {
-		    case <-ctx.Done():
-				return nil, fmt.Errorf("context cancelled")
-			
-		    default:
-				break
+		case <-ctx.Done():
+			return nil, fmt.Errorf("context cancelled")
+
+		default:
+			break
 		}
 
 		startUpMsg, err := s.left.ReceiveStartupMessage()
@@ -90,10 +112,12 @@ func (s *GatedSession) waitForClientStartup(ctx context.Context) (*pgproto3.Star
 			return startUpMsg, nil
 
 		case *pgproto3.SSLRequest:
+			// deny SSL request, exepcting client to retry without SSL
 			_, err = s.clientConn.Write([]byte("N"))
 			if err != nil {
 				return nil, fmt.Errorf("error sending deny SSL request: %w", err)
 			}
+			s.logger.Debug("SSL request denied")
 
 			continue
 		default:
@@ -102,7 +126,7 @@ func (s *GatedSession) waitForClientStartup(ctx context.Context) (*pgproto3.Star
 	}
 }
 
-func (s *GatedSession) connectToBackend(remote RemotePgBackend) error {
+func (s *GatedSession) connectToPg(remote RemotePgBackend) error {
 	s.logger.Debug("connecting to remote", "host", remote.Host, "port", remote.Port, "user", remote.User, "database", remote.Database, "params", remote.Params)
 	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", remote.Host, remote.Port))
 	if err != nil {
@@ -135,10 +159,11 @@ func (s *GatedSession) connectToBackend(remote RemotePgBackend) error {
 	}
 
 	s.logger.Debug("startup message sent")
+
 	return nil
 }
 
-func (s *GatedSession) authHandshake(user, pass string) error {
+func (s *GatedSession) remoteHandshake(user, pass string) error {
 	s.logger.Debug("waiting for auth method negotiate")
 	msg, err := s.right.Receive()
 	if err != nil {
@@ -206,7 +231,7 @@ func (s *GatedSession) copySteadyState(ctx context.Context) error {
 		for {
 			select {
 			case <-ctx.Done():
-				s.close()
+				s.Close()
 				return
 			default:
 				msg, err := s.right.Receive()
@@ -227,7 +252,7 @@ func (s *GatedSession) copySteadyState(ctx context.Context) error {
 		for {
 			select {
 			case <-ctx.Done():
-				s.close()
+				s.Close()
 				return
 			default:
 				msg, err := s.left.Receive()
@@ -247,12 +272,19 @@ func (s *GatedSession) copySteadyState(ctx context.Context) error {
 	return nil
 }
 
-func (s *GatedSession) close() {
+func (s *GatedSession) Close() {
 	s.closing.Do(func() {
-		s.logger.Debug("closing session")
-		s.left.Flush()
-		s.clientConn.Close()
-		s.right.Flush()
-		s.serverConn.Close()
+		s.logger.Debug("session closing")
+		if s.left != nil {
+			s.left.Flush()
+			s.clientConn.Close()
+		}
+
+		if s.right != nil {
+			s.right.Flush()
+			s.serverConn.Close()
+		}
+
+		s.logger.Debug("session closed")
 	})
 }
