@@ -2,7 +2,6 @@ package pggw
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"net"
@@ -10,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/jackc/pgx/v5/pgproto3"
-	"github.com/lib/pq/scram"
 )
 
 type Session interface {
@@ -69,7 +67,7 @@ func (s *GatedSession) Run(ctx context.Context) {
 		return
 	}
 
-	err = s.remoteHandshake(remote.User, remote.Password)
+	err = s.remoteAuthHandshake(remote.User, remote.Password)
 	if err != nil {
 		s.logger.Error("failed to authenticate remote session", "err", err)
 		s.left.Send(&pgproto3.ErrorResponse{
@@ -163,7 +161,7 @@ func (s *GatedSession) connectToPg(remote RemotePgBackend) error {
 	return nil
 }
 
-func (s *GatedSession) remoteHandshake(user, pass string) error {
+func (s *GatedSession) remoteAuthHandshake(user, pass string) error {
 	s.logger.Debug("waiting for auth method negotiate")
 	msg, err := s.right.Receive()
 	if err != nil {
@@ -177,12 +175,14 @@ func (s *GatedSession) remoteHandshake(user, pass string) error {
 			return fmt.Errorf("unsupported SASL mechanisms: %#v", msg)
 		}
 
-		sc := scram.NewClient(sha256.New, user, pass)
-		sc.Step(nil)
+		sc, err := newScramClient(msg.AuthMechanisms, pass)
+		if err != nil {
+			return fmt.Errorf("error creating SCRAM client: %w", err)
+		}
 
 		s.right.Send(&pgproto3.SASLInitialResponse{
 			AuthMechanism: "SCRAM-SHA-256",
-			Data:          sc.Out(),
+			Data:          sc.clientFirstMessage(),
 		})
 		if err := s.right.Flush(); err != nil {
 			return fmt.Errorf("error sending SASL initial response: %w", err)
@@ -198,9 +198,9 @@ func (s *GatedSession) remoteHandshake(user, pass string) error {
 			return fmt.Errorf("expected SASL continue message, got %#v", contMsg)
 		}
 
-		sc.Step(contMsg.Data)
+		sc.recvServerFirstMessage(contMsg.Data)
 		s.right.Send(&pgproto3.SASLResponse{
-			Data: sc.Out(),
+			Data: []byte(sc.clientFinalMessage()),
 		})
 		if err := s.right.Flush(); err != nil {
 			return fmt.Errorf("error sending SASL response: %w", err)
@@ -214,6 +214,11 @@ func (s *GatedSession) remoteHandshake(user, pass string) error {
 		finalMsg, ok := next.(*pgproto3.AuthenticationSASLFinal)
 		if !ok {
 			return fmt.Errorf("expected SASL final message, got %#v", finalMsg)
+		}
+
+		err = sc.recvServerFinalMessage(finalMsg.Data)
+		if err != nil {
+			return fmt.Errorf("error validating SASL final message: %w", err)
 		}
 
 		s.saslFinal = finalMsg.Data

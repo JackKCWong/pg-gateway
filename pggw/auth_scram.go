@@ -1,4 +1,5 @@
-// copied from https://github.com/jackc/pgx/blob/master/pgconn/auth_scram.go blob:https://github.com/bf577529-2f7c-439c-9aea-23630c3a7422
+// modified based on https://github.com/jackc/pgx/blob/master/pgconn/auth_scram.go blob:https://github.com/bf577529-2f7c-439c-9aea-23630c3a7422
+// include a copy of the MIT license here
 
 // Copyright (c) 2013-2021 Jack Christensen
 // MIT License
@@ -34,7 +35,7 @@
 //   https://github.com/lib/pq/pull/788
 //   https://github.com/lib/pq/pull/833
 
-package pgconn
+package pggw 
 
 import (
 	"bytes"
@@ -46,88 +47,11 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/jackc/pgx/v5/pgproto3"
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/text/secure/precis"
 )
 
 const clientNonceLen = 18
-
-// Perform SCRAM authentication.
-func (c *PgConn) scramAuth(serverAuthMechanisms []string) error {
-	sc, err := newScramClient(serverAuthMechanisms, c.config.Password)
-	if err != nil {
-		return err
-	}
-
-	// Send client-first-message in a SASLInitialResponse
-	saslInitialResponse := &pgproto3.SASLInitialResponse{
-		AuthMechanism: "SCRAM-SHA-256",
-		Data:          sc.clientFirstMessage(),
-	}
-	c.frontend.Send(saslInitialResponse)
-	err = c.flushWithPotentialWriteReadDeadlock()
-	if err != nil {
-		return err
-	}
-
-	// Receive server-first-message payload in an AuthenticationSASLContinue.
-	saslContinue, err := c.rxSASLContinue()
-	if err != nil {
-		return err
-	}
-	err = sc.recvServerFirstMessage(saslContinue.Data)
-	if err != nil {
-		return err
-	}
-
-	// Send client-final-message in a SASLResponse
-	saslResponse := &pgproto3.SASLResponse{
-		Data: []byte(sc.clientFinalMessage()),
-	}
-	c.frontend.Send(saslResponse)
-	err = c.flushWithPotentialWriteReadDeadlock()
-	if err != nil {
-		return err
-	}
-
-	// Receive server-final-message payload in an AuthenticationSASLFinal.
-	saslFinal, err := c.rxSASLFinal()
-	if err != nil {
-		return err
-	}
-	return sc.recvServerFinalMessage(saslFinal.Data)
-}
-
-func (c *PgConn) rxSASLContinue() (*pgproto3.AuthenticationSASLContinue, error) {
-	msg, err := c.receiveMessage()
-	if err != nil {
-		return nil, err
-	}
-	switch m := msg.(type) {
-	case *pgproto3.AuthenticationSASLContinue:
-		return m, nil
-	case *pgproto3.ErrorResponse:
-		return nil, ErrorResponseToPgError(m)
-	}
-
-	return nil, fmt.Errorf("expected AuthenticationSASLContinue message but received unexpected message %T", msg)
-}
-
-func (c *PgConn) rxSASLFinal() (*pgproto3.AuthenticationSASLFinal, error) {
-	msg, err := c.receiveMessage()
-	if err != nil {
-		return nil, err
-	}
-	switch m := msg.(type) {
-	case *pgproto3.AuthenticationSASLFinal:
-		return m, nil
-	case *pgproto3.ErrorResponse:
-		return nil, ErrorResponseToPgError(m)
-	}
-
-	return nil, fmt.Errorf("expected AuthenticationSASLFinal message but received unexpected message %T", msg)
-}
 
 type scramClient struct {
 	serverAuthMechanisms []string
