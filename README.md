@@ -1,6 +1,8 @@
 # pg-gateway
 
-A gateway for proxying to remote PostgreSQL DB. Useful when you want to connect a PG client (e.g. PSQL) to a remote backend that use custom credential management. (e.g. dynamic password)
+A gateway for proxying to remote PostgreSQL DB. Useful when you want to connect a PG client (e.g. PSQL) to a remote backend that use custom credential management during development. (e.g. dynamic password)
+
+This is NOT meant to be used in PRODUCTION.
 
 ## features
 
@@ -25,6 +27,7 @@ A gateway for proxying to remote PostgreSQL DB. Useful when you want to connect 
 
     // start gateway
 	go gw.Serve(ctx, "localhost:8888")
+	defer gw.Close()
 
     // connect to gateway via any pg driver
 	conn, err := pgx.Connect(context.TODO(), "postgres://localhost:8888/postgres?user=foobar&sslmode=disable")
@@ -35,5 +38,6 @@ A gateway for proxying to remote PostgreSQL DB. Useful when you want to connect 
 
 [x] support SASL SCRAM-SHA-256
 
-[] support SSL
+
+[] remove dependency on `lib/pg`
 
