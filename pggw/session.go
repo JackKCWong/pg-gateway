@@ -95,7 +95,6 @@ func (s *GatedSession) clientHandshake(ctx context.Context) (*pgproto3.StartupMe
 			return nil, fmt.Errorf("context cancelled")
 
 		default:
-			break
 		}
 
 		startUpMsg, err := s.left.ReceiveStartupMessage()
@@ -109,6 +108,15 @@ func (s *GatedSession) clientHandshake(ctx context.Context) (*pgproto3.StartupMe
 			s.logger.Debug("client startup received")
 			return startUpMsg, nil
 
+		case *pgproto3.GSSEncRequest:
+			// deny GSS request, exepcting client to retry without GSS
+			_, err = s.clientConn.Write([]byte("N"))
+			if err != nil {
+				return nil, fmt.Errorf("error sending deny GSS request: %w", err)
+			}
+			s.logger.Debug("GSS request denied")
+
+			continue
 		case *pgproto3.SSLRequest:
 			// deny SSL request, exepcting client to retry without SSL
 			_, err = s.clientConn.Write([]byte("N"))
