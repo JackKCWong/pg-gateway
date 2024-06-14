@@ -2,7 +2,9 @@ package pggw
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"slices"
@@ -67,7 +69,7 @@ func (s *GatedSession) Run(ctx context.Context) {
 		return
 	}
 
-	err = s.remoteAuthHandshake(remote.User, remote.Password)
+	err = s.remoteAuthHandshake(remote.Password)
 	if err != nil {
 		s.logger.Error("failed to authenticate remote session", "err", err)
 		s.left.Send(&pgproto3.ErrorResponse{
@@ -169,7 +171,7 @@ func (s *GatedSession) connectToPg(remote RemotePgBackend) error {
 	return nil
 }
 
-func (s *GatedSession) remoteAuthHandshake(user, pass string) error {
+func (s *GatedSession) remoteAuthHandshake(pass string) error {
 	s.logger.Debug("waiting for auth method negotiate")
 	msg, err := s.right.Receive()
 	if err != nil {
@@ -248,12 +250,12 @@ func (s *GatedSession) copySteadyState(ctx context.Context) error {
 				return
 			default:
 				msg, err := s.right.Receive()
-				if err != nil {
+				if err != nil && !isEOF(err) {
 					s.logger.Error("error receiving message from remote", "err", err)
 					return
 				}
 				s.left.Send(msg)
-				if err := s.left.Flush(); err != nil {
+				if err := s.left.Flush(); err != nil && !isEOF(err) {
 					s.logger.Error("error sending message to client", "err", err, "msg", msg)
 					return
 				}
@@ -269,12 +271,12 @@ func (s *GatedSession) copySteadyState(ctx context.Context) error {
 				return
 			default:
 				msg, err := s.left.Receive()
-				if err != nil {
+				if err != nil && !isEOF(err) {
 					s.logger.Error("error receiving message from client", "err", err)
 					return
 				}
 				s.right.Send(msg)
-				if err := s.right.Flush(); err != nil {
+				if err := s.right.Flush(); err != nil && !isEOF(err) {
 					s.logger.Error("error sending message to remote", "err", err, "msg", msg)
 					return
 				}
@@ -300,4 +302,8 @@ func (s *GatedSession) Close() {
 
 		s.logger.Debug("session closed")
 	})
+}
+
+func isEOF(err error) bool {
+    return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
